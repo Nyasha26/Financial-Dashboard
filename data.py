@@ -66,23 +66,77 @@ def get_series(series_id, start_date=None, end_date=None, use_cache=True):
     return df
 
 
+def get_dollar_ma_series(window=200, start_date=None, end_date=None, use_cache=True):
+    """
+    DTWEXBGS with an N-day moving average computed on DTWEXBGS's own
+    (business-day) calendar, before any alignment onto a target index's
+    calendar. Computing the MA first and aligning it afterwards keeps it a
+    true N-trading-day dollar-market average even when the target
+    calendar is coarser than daily (e.g. a monthly index) - aligning the
+    raw value alone and taking an N-row rolling mean post-alignment would
+    silently turn "200-day" into "200-month" for a monthly target.
+    """
+    dxy = get_series("DTWEXBGS", start_date, end_date, use_cache=use_cache)
+    dxy = dxy.rename(columns={"value": "DTWEXBGS"}).sort_values("date").reset_index(drop=True)
+    dxy["DTWEXBGS_MA"] = dxy["DTWEXBGS"].rolling(window, min_periods=window).mean()
+    return dxy
+
+
+def get_regime_drivers(dollar_ma_window=200, start_date=None, end_date=None, use_cache=True):
+    """
+    T10Y2Y and DTWEXBGS (+ its moving average) as one frame, ready to be
+    aligned onto any target index's calendar via merge_asof.
+    """
+    t10y2y = get_series("T10Y2Y", start_date, end_date, use_cache=use_cache)
+    t10y2y = t10y2y.rename(columns={"value": "T10Y2Y"}).sort_values("date")
+
+    dxy = get_dollar_ma_series(dollar_ma_window, start_date, end_date, use_cache=use_cache)
+
+    drivers = pd.merge_asof(t10y2y, dxy, on="date", direction="backward")
+    return drivers.dropna().reset_index(drop=True)
+
+
+def get_aligned_series(
+    target_id,
+    start_date=None,
+    end_date=None,
+    use_cache=True,
+    include_fed=False,
+    dollar_ma_window=200,
+):
+    """
+    Pull `target_id` and align T10Y2Y + DTWEXBGS (+ its moving average),
+    and optionally FEDFUNDS, onto its calendar. Drivers that update less
+    often than the target (FEDFUNDS is monthly) are forward-filled onto
+    that calendar via merge_asof, i.e. each row carries the most recently
+    published driver value as of that date.
+
+    Returns a DataFrame with columns
+    [date, <target_id>, T10Y2Y, DTWEXBGS, DTWEXBGS_MA] (+ FEDFUNDS if
+    include_fed=True).
+    """
+    target = get_series(target_id, start_date, end_date, use_cache=use_cache)
+    target = target.rename(columns={"value": target_id}).sort_values("date").reset_index(drop=True)
+
+    drivers = get_regime_drivers(dollar_ma_window, start_date, end_date, use_cache=use_cache)
+    aligned = pd.merge_asof(target, drivers, on="date", direction="backward")
+
+    if include_fed:
+        fedfunds = get_series("FEDFUNDS", start_date, end_date, use_cache=use_cache)
+        fedfunds = fedfunds.rename(columns={"value": "FEDFUNDS"}).sort_values("date")
+        aligned = pd.merge_asof(aligned, fedfunds, on="date", direction="backward")
+
+    return aligned.dropna().reset_index(drop=True)
+
+
 def get_regime_inputs(start_date=None, end_date=None, use_cache=True):
     """
     Pull T10Y2Y, DTWEXBGS, FEDFUNDS and SP500 and align them on SP500's
-    trading-day calendar. Series that update less often than daily
-    (FEDFUNDS is monthly) are forward-filled onto that calendar, i.e. each
-    trading day carries the most recently published value as of that date.
+    trading-day calendar.
 
-    Returns a DataFrame with columns [date, SP500, T10Y2Y, DTWEXBGS, FEDFUNDS].
+    Returns a DataFrame with columns
+    [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, FEDFUNDS].
     """
-    sp500 = get_series("SP500", start_date, end_date, use_cache=use_cache)
-    sp500 = sp500.rename(columns={"value": "SP500"}).sort_values("date")
-
-    aligned = sp500.reset_index(drop=True)
-    for series_id in ("T10Y2Y", "DTWEXBGS", "FEDFUNDS"):
-        driver = get_series(series_id, start_date, end_date, use_cache=use_cache)
-        driver = driver.rename(columns={"value": series_id}).sort_values("date")
-        aligned = pd.merge_asof(aligned, driver, on="date", direction="backward")
-
-    aligned = aligned.dropna().reset_index(drop=True)
-    return aligned
+    return get_aligned_series(
+        "SP500", start_date, end_date, use_cache=use_cache, include_fed=True
+    )

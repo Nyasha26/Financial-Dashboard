@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 
 TRADING_DAYS_PER_YEAR = 252
+MONTHS_PER_YEAR = 12
 
-DOLLAR_MA_WINDOW = 200  # trading days
 FED_LOOKBACK_DAYS = 182  # ~6 calendar months
 FED_HOLD_THRESHOLD = 0.10  # pp change over the lookback treated as "roughly flat"
 
@@ -39,10 +39,15 @@ def classify_yield_curve_regime(t10y2y: pd.Series) -> pd.Series:
     return pd.Categorical(values, categories=YIELD_CURVE_ORDER, ordered=True)
 
 
-def classify_dollar_regime(dtwexbgs: pd.Series, window: int = DOLLAR_MA_WINDOW) -> pd.Categorical:
-    ma = dtwexbgs.rolling(window, min_periods=window).mean()
-    values = np.where(dtwexbgs > ma, "Strong Dollar", "Weak Dollar")
-    values = np.where(ma.isna(), None, values)
+def classify_dollar_regime(dtwexbgs: pd.Series, dtwexbgs_ma: pd.Series) -> pd.Categorical:
+    """
+    dtwexbgs_ma must already be the moving average computed on DTWEXBGS's
+    own daily calendar (see data.get_dollar_ma_series) - computing it here
+    on whatever calendar `dtwexbgs` happens to be aligned to would silently
+    change the window length for non-daily targets.
+    """
+    values = np.where(dtwexbgs > dtwexbgs_ma, "Strong Dollar", "Weak Dollar")
+    values = np.where(dtwexbgs_ma.isna(), None, values)
     return pd.Categorical(values, categories=DOLLAR_ORDER, ordered=True)
 
 
@@ -63,14 +68,14 @@ def classify_fed_regime(
 
 def build_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Takes the aligned [date, SP500, T10Y2Y, DTWEXBGS, FEDFUNDS] frame from
-    data.get_regime_inputs and adds regime classification columns. Rows
-    that fall in the classifiers' burn-in window (e.g. before 200 days of
-    dollar-index history exist) are dropped.
+    Takes the aligned [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, FEDFUNDS]
+    frame from data.get_regime_inputs and adds regime classification
+    columns (yield curve, dollar, Fed, and the combined label). Rows that
+    fall in the classifiers' burn-in window are dropped.
     """
     out = df.copy()
     out["yield_curve_regime"] = classify_yield_curve_regime(out["T10Y2Y"])
-    out["dollar_regime"] = classify_dollar_regime(out["DTWEXBGS"])
+    out["dollar_regime"] = classify_dollar_regime(out["DTWEXBGS"], out["DTWEXBGS_MA"])
     out["fed_regime"] = classify_fed_regime(out)
     out = out.dropna(
         subset=["yield_curve_regime", "dollar_regime", "fed_regime"]
@@ -86,32 +91,52 @@ def build_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def compute_regime_stats(df: pd.DataFrame, group_cols) -> pd.DataFrame:
+def build_two_factor_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Per-regime S&P 500 annualized return, annualized vol, a Sharpe-like
-    return/vol ratio, and % of trading days in that regime.
+    Like build_regime_frame but classifies only the yield-curve and dollar
+    regimes (no Fed regime, no combined label) - for indices where the
+    Fed-funds factor isn't part of the analysis.
+    """
+    out = df.copy()
+    out["yield_curve_regime"] = classify_yield_curve_regime(out["T10Y2Y"])
+    out["dollar_regime"] = classify_dollar_regime(out["DTWEXBGS"], out["DTWEXBGS_MA"])
+    out = out.dropna(subset=["yield_curve_regime", "dollar_regime"]).reset_index(drop=True)
+    return out
+
+
+def compute_regime_stats(
+    df: pd.DataFrame,
+    group_cols,
+    price_col: str = "SP500",
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.DataFrame:
+    """
+    Per-regime annualized return, annualized vol, a Sharpe-like return/vol
+    ratio, and % of the sample's periods (trading days, or months for a
+    monthly price series) in that regime, for `price_col`.
 
     group_cols can be a single column name (e.g. "yield_curve_regime") or a
     list of column names (e.g. ["yield_curve_regime", "dollar_regime"] for
-    a 2-way cross).
+    a 2-way cross). periods_per_year should match price_col's frequency
+    (252 for a daily series, 12 for a monthly one).
     """
     if isinstance(group_cols, str):
         group_cols = [group_cols]
 
     d = df.copy()
-    d["sp_return"] = d["SP500"].pct_change()
-    d = d.dropna(subset=["sp_return"])
-    total_days = len(d)
+    d["_return"] = d[price_col].pct_change()
+    d = d.dropna(subset=["_return"])
+    total_periods = len(d)
 
     stats = (
-        d.groupby(group_cols, observed=True)["sp_return"]
+        d.groupby(group_cols, observed=True)["_return"]
         .agg(mean="mean", std="std", n_days="count")
         .reset_index()
     )
-    stats["annualized_return"] = stats["mean"] * TRADING_DAYS_PER_YEAR
-    stats["annualized_vol"] = stats["std"] * np.sqrt(TRADING_DAYS_PER_YEAR)
+    stats["annualized_return"] = stats["mean"] * periods_per_year
+    stats["annualized_vol"] = stats["std"] * np.sqrt(periods_per_year)
     stats["sharpe"] = stats["annualized_return"] / stats["annualized_vol"]
-    stats["pct_of_days"] = stats["n_days"] / total_days * 100
+    stats["pct_of_days"] = stats["n_days"] / total_periods * 100
     stats = stats.drop(columns=["mean", "std"])
 
     return stats

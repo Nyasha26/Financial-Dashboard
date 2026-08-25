@@ -4,12 +4,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data import get_regime_inputs, get_series
+from data import get_aligned_series, get_regime_inputs, get_series
 from regimes import (
     DOLLAR_ORDER,
     FED_ORDER,
+    MONTHS_PER_YEAR,
+    TRADING_DAYS_PER_YEAR,
     YIELD_CURVE_ORDER,
     build_regime_frame,
+    build_two_factor_regime_frame,
     compute_regime_stats,
     regime_periods,
 )
@@ -62,6 +65,46 @@ def load_regime_frame(bypass_cache: bool = False) -> pd.DataFrame:
     return build_regime_frame(raw)
 
 
+# Global equity indices, classified on the same yield-curve and dollar
+# regimes as S&P 500 (no Fed regime for these). FRED has no native Russell
+# 2000 price index (only a volatility index), so it's left out entirely
+# rather than faked with an unrelated proxy.
+GLOBAL_INDICES = {
+    "Nikkei 225": dict(
+        series_id="NIKKEI225",
+        periods_per_year=TRADING_DAYS_PER_YEAR,
+        period_noun="trading days",
+        is_proxy=False,
+        note="Native FRED series (NIKKEI225), daily close.",
+    ),
+    "FTSE 100 (UK proxy)": dict(
+        series_id="SPASTT01GBM661N",
+        periods_per_year=MONTHS_PER_YEAR,
+        period_noun="months",
+        is_proxy=True,
+        note="FRED has no FTSE 100 series. This is OECD's monthly broad "
+        "UK share-price index (SPASTT01GBM661N) - a directional proxy, "
+        "not the literal FTSE 100.",
+    ),
+    "SSE Composite (China proxy)": dict(
+        series_id="SPASTT01CNM661N",
+        periods_per_year=MONTHS_PER_YEAR,
+        period_noun="months",
+        is_proxy=True,
+        note="FRED has no Shanghai Composite series. This is OECD's "
+        "monthly broad China share-price index (SPASTT01CNM661N) - a "
+        "directional proxy, not the literal SSE Composite.",
+    ),
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_global_index_frame(index_key: str, bypass_cache: bool = False) -> pd.DataFrame:
+    series_id = GLOBAL_INDICES[index_key]["series_id"]
+    raw = get_aligned_series(series_id, use_cache=not bypass_cache, include_fed=False)
+    return build_two_factor_regime_frame(raw)
+
+
 st.title("Nyasha Mugabe Dashboard")
 
 # ---------------------------------------------------------------------------
@@ -101,6 +144,7 @@ with st.sidebar:
 if refresh_clicked:
     load_series.clear()
     load_regime_frame.clear()
+    load_global_index_frame.clear()
 
 
 def render_single_series_tab() -> None:
@@ -223,15 +267,29 @@ REGIME_METRICS = {
 }
 
 
-def _ordered_stats(rf: pd.DataFrame, group_col: str, order: list[str]) -> pd.DataFrame:
-    stats = compute_regime_stats(rf, group_col).set_index(group_col)
+def _ordered_stats(
+    rf: pd.DataFrame,
+    group_col: str,
+    order: list[str],
+    price_col: str = "SP500",
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.DataFrame:
+    stats = compute_regime_stats(
+        rf, group_col, price_col=price_col, periods_per_year=periods_per_year
+    ).set_index(group_col)
     return stats.reindex(order).reset_index()
 
 
-def _factor_bar(stats: pd.DataFrame, group_col: str, order: list[str], title: str) -> go.Figure:
+def _factor_bar(
+    stats: pd.DataFrame,
+    group_col: str,
+    order: list[str],
+    title: str,
+    period_noun: str = "trading days",
+) -> go.Figure:
     colors = [CATEGORICAL_COLORS[i % len(CATEGORICAL_COLORS)] for i in range(len(order))]
     text = [
-        f"{p:.0f}% of days" if pd.notna(p) else "no data"
+        f"{p:.0f}% of {period_noun}" if pd.notna(p) else "no data"
         for p in stats["pct_of_days"]
     ]
     fig = go.Figure(
@@ -251,6 +309,100 @@ def _factor_bar(stats: pd.DataFrame, group_col: str, order: list[str], title: st
         showlegend=False,
     )
     return fig
+
+
+def _render_cross_heatmap(
+    rf: pd.DataFrame,
+    price_col: str,
+    periods_per_year: float,
+    period_noun: str,
+    key_prefix: str,
+) -> None:
+    metric_label = st.radio(
+        "Cell metric",
+        list(REGIME_METRICS.keys()),
+        horizontal=True,
+        key=f"{key_prefix}_metric",
+    )
+    metric_col, unit, scale_kind = REGIME_METRICS[metric_label]
+
+    cross = compute_regime_stats(
+        rf,
+        ["yield_curve_regime", "dollar_regime"],
+        price_col=price_col,
+        periods_per_year=periods_per_year,
+    )
+    value_pivot = cross.pivot(
+        index="yield_curve_regime", columns="dollar_regime", values=metric_col
+    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
+    pct_pivot = cross.pivot(
+        index="yield_curve_regime", columns="dollar_regime", values="pct_of_days"
+    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
+    n_pivot = cross.pivot(
+        index="yield_curve_regime", columns="dollar_regime", values="n_days"
+    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
+
+    display_vals = value_pivot * 100 if unit == "%" else value_pivot
+
+    cell_text = [
+        [
+            (f"{v:.1f}{unit}" if pd.notna(v) else "n/a")
+            + (
+                "*"
+                if pd.notna(pct_pivot.iloc[r, c]) and pct_pivot.iloc[r, c] < 5
+                else ""
+            )
+            for c, v in enumerate(row)
+        ]
+        for r, row in enumerate(display_vals.values)
+    ]
+    customdata = [
+        [
+            [pct_pivot.iloc[r, c], n_pivot.iloc[r, c]]
+            for c in range(len(DOLLAR_ORDER))
+        ]
+        for r in range(len(YIELD_CURVE_ORDER))
+    ]
+
+    if scale_kind == "diverging":
+        zmax = float(pd.Series(display_vals.values.flatten()).abs().max())
+        zmax = zmax if zmax and pd.notna(zmax) else 1.0
+        heat_kwargs = dict(colorscale="RdBu", zmid=0, zmin=-zmax, zmax=zmax)
+    else:
+        heat_kwargs = dict(colorscale="Blues")
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=display_vals.values,
+            x=[str(c) for c in display_vals.columns],
+            y=[str(i) for i in display_vals.index],
+            text=cell_text,
+            texttemplate="%{text}",
+            customdata=customdata,
+            hovertemplate=(
+                "%{y} / %{x}<br>"
+                + metric_label
+                + ": %{z:.2f}"
+                + unit
+                + "<br>%{customdata[1]} "
+                + period_noun
+                + " (%{customdata[0]:.1f}% of sample)"
+                + "<extra></extra>"
+            ),
+            colorbar=dict(title=metric_label),
+            **heat_kwargs,
+        )
+    )
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_title="Dollar regime",
+        yaxis_title="Yield curve regime",
+    )
+    st.plotly_chart(fig, width="stretch", theme="streamlit")
+    st.caption(
+        f"* fewer than 5% of {period_noun} in this bucket — interpret with caution."
+    )
 
 
 def render_regime_tab() -> None:
@@ -307,81 +459,13 @@ def render_regime_tab() -> None:
     )
 
     st.subheader("Yield curve x Dollar regime")
-    metric_label = st.radio(
-        "Cell metric",
-        list(REGIME_METRICS.keys()),
-        horizontal=True,
+    _render_cross_heatmap(
+        rf,
+        price_col="SP500",
+        periods_per_year=TRADING_DAYS_PER_YEAR,
+        period_noun="trading days",
+        key_prefix="sp500",
     )
-    metric_col, unit, scale_kind = REGIME_METRICS[metric_label]
-
-    cross = compute_regime_stats(rf, ["yield_curve_regime", "dollar_regime"])
-    value_pivot = cross.pivot(
-        index="yield_curve_regime", columns="dollar_regime", values=metric_col
-    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
-    pct_pivot = cross.pivot(
-        index="yield_curve_regime", columns="dollar_regime", values="pct_of_days"
-    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
-    n_pivot = cross.pivot(
-        index="yield_curve_regime", columns="dollar_regime", values="n_days"
-    ).reindex(index=YIELD_CURVE_ORDER, columns=DOLLAR_ORDER)
-
-    display_vals = value_pivot * 100 if unit == "%" else value_pivot
-
-    cell_text = [
-        [
-            (f"{v:.1f}{unit}" if pd.notna(v) else "n/a")
-            + (
-                "*"
-                if pd.notna(pct_pivot.iloc[r, c]) and pct_pivot.iloc[r, c] < 5
-                else ""
-            )
-            for c, v in enumerate(row)
-        ]
-        for r, row in enumerate(display_vals.values)
-    ]
-    customdata = [
-        [
-            [pct_pivot.iloc[r, c], n_pivot.iloc[r, c]]
-            for c in range(len(DOLLAR_ORDER))
-        ]
-        for r in range(len(YIELD_CURVE_ORDER))
-    ]
-
-    if scale_kind == "diverging":
-        zmax = float(pd.Series(display_vals.values.flatten()).abs().max())
-        zmax = zmax if zmax and pd.notna(zmax) else 1.0
-        heat_kwargs = dict(colorscale="RdBu", zmid=0, zmin=-zmax, zmax=zmax)
-    else:
-        heat_kwargs = dict(colorscale="Blues")
-
-    fig = go.Figure(
-        go.Heatmap(
-            z=display_vals.values,
-            x=[str(c) for c in display_vals.columns],
-            y=[str(i) for i in display_vals.index],
-            text=cell_text,
-            texttemplate="%{text}",
-            customdata=customdata,
-            hovertemplate=(
-                "%{y} / %{x}<br>"
-                + metric_label
-                + ": %{z:.2f}"
-                + unit
-                + "<br>%{customdata[1]} days (%{customdata[0]:.1f}% of sample)"
-                + "<extra></extra>"
-            ),
-            colorbar=dict(title=metric_label),
-            **heat_kwargs,
-        )
-    )
-    fig.update_layout(
-        height=380,
-        margin=dict(l=10, r=10, t=20, b=10),
-        xaxis_title="Dollar regime",
-        yaxis_title="Yield curve regime",
-    )
-    st.plotly_chart(fig, width="stretch", theme="streamlit")
-    st.caption("* fewer than 5% of trading days in this bucket — interpret with caution.")
 
     with st.expander("All regime combinations (yield curve / dollar / Fed), aggregated"):
         combo = compute_regime_stats(rf, "regime_label").sort_values(
@@ -428,8 +512,82 @@ def render_regime_tab() -> None:
         )
 
 
-tab1, tab2 = st.tabs(["Single Series", "Regime Analysis"])
+# ---------------------------------------------------------------------------
+# Global Indices tab
+# ---------------------------------------------------------------------------
+def render_global_indices_tab() -> None:
+    st.info(
+        "Russell 2000 isn't included: FRED has no Russell 2000 price index "
+        "(only a volatility index, RVXCLS, which isn't usable for returns)."
+    )
+
+    index_key = st.selectbox("Index", list(GLOBAL_INDICES.keys()))
+    meta = GLOBAL_INDICES[index_key]
+
+    with st.spinner(f"Loading {index_key} data from FRED..."):
+        try:
+            gf = load_global_index_frame(index_key, bypass_cache=refresh_clicked)
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+    if gf.empty:
+        st.info("Not enough overlapping history yet to classify regimes for this index.")
+        return
+
+    if meta["is_proxy"]:
+        st.warning(meta["note"])
+
+    st.caption(
+        f"{len(gf):,} {meta['period_noun']} classified, "
+        f"{gf['date'].min().date()} - {gf['date'].max().date()}."
+    )
+
+    price_col = meta["series_id"]
+    periods_per_year = meta["periods_per_year"]
+    period_noun = meta["period_noun"]
+
+    st.subheader(f"{index_key} return by regime")
+    col1, col2 = st.columns(2)
+    with col1:
+        stats = _ordered_stats(
+            gf, "yield_curve_regime", YIELD_CURVE_ORDER, price_col, periods_per_year
+        )
+        st.plotly_chart(
+            _factor_bar(
+                stats, "yield_curve_regime", YIELD_CURVE_ORDER, "Yield curve", period_noun
+            ),
+            width="stretch",
+            theme="streamlit",
+        )
+    with col2:
+        stats = _ordered_stats(
+            gf, "dollar_regime", DOLLAR_ORDER, price_col, periods_per_year
+        )
+        st.plotly_chart(
+            _factor_bar(stats, "dollar_regime", DOLLAR_ORDER, "Dollar", period_noun),
+            width="stretch",
+            theme="streamlit",
+        )
+    st.caption(
+        f"Bar labels show the share of {period_noun} in that regime — "
+        "treat thin bars' return figures cautiously; small samples are noisy."
+    )
+
+    st.subheader("Yield curve x Dollar regime")
+    _render_cross_heatmap(
+        gf,
+        price_col=price_col,
+        periods_per_year=periods_per_year,
+        period_noun=period_noun,
+        key_prefix=f"global_{price_col}",
+    )
+
+
+tab1, tab2, tab3 = st.tabs(["Single Series", "Regime Analysis", "Global Indices"])
 with tab1:
     render_single_series_tab()
 with tab2:
     render_regime_tab()
+with tab3:
+    render_global_indices_tab()
