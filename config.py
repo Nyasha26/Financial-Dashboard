@@ -1,0 +1,13 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+FRED_API_KEY = os.getenv("FRED_API_KEY")
+
+if not FRED_API_KEY:
+    raise RuntimeError(
+        "FRED_API_KEY not found. Add it to a .env file in the project root, "
+        "e.g. FRED_API_KEY=your_key_here"
+    )
