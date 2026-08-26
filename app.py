@@ -28,6 +28,7 @@ PRESETS = {
     "BAMLH0A0HYM2": "HY OAS",
     "FEDFUNDS": "Fed Funds Rate",
     "CPIAUCSL": "CPI",
+    "DTWEXBGS": "Nominal Dollar Index",
 }
 
 # Validated categorical palette (see dataviz skill), fixed order.
