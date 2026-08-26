@@ -106,6 +106,43 @@ def load_global_index_frame(index_key: str, bypass_cache: bool = False) -> pd.Da
     return build_two_factor_regime_frame(raw)
 
 
+# ICE BofA total-return indices, classified on the same yield-curve and
+# dollar regimes. All three only have history on FRED back to 2023-08-28,
+# so the analysis window is short - the date range shown in the tab makes
+# that visible rather than hiding it.
+CREDIT_INDICES = {
+    "US High Yield (ICE BofA)": dict(
+        series_id="BAMLHYH0A0HYM2TRIV",
+        periods_per_year=TRADING_DAYS_PER_YEAR,
+        period_noun="trading days",
+        is_proxy=False,
+        note="ICE BofA US High Yield Index, Total Return Index Value (BAMLHYH0A0HYM2TRIV).",
+    ),
+    "US Corporate (ICE BofA)": dict(
+        series_id="BAMLCC0A0CMTRIV",
+        periods_per_year=TRADING_DAYS_PER_YEAR,
+        period_noun="trading days",
+        is_proxy=False,
+        note="ICE BofA US Corporate Index, Total Return Index Value (BAMLCC0A0CMTRIV).",
+    ),
+    "EM Corporate (ICE BofA)": dict(
+        series_id="BAMLEMCBPITRIV",
+        periods_per_year=TRADING_DAYS_PER_YEAR,
+        period_noun="trading days",
+        is_proxy=False,
+        note="ICE BofA Emerging Markets Corporate Plus Index, Total Return "
+        "Index Value (BAMLEMCBPITRIV).",
+    ),
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_credit_index_frame(index_key: str, bypass_cache: bool = False) -> pd.DataFrame:
+    series_id = CREDIT_INDICES[index_key]["series_id"]
+    raw = get_aligned_series(series_id, use_cache=not bypass_cache, include_fed=False)
+    return build_two_factor_regime_frame(raw)
+
+
 st.title("Nyasha Mugabe Dashboard")
 
 # ---------------------------------------------------------------------------
@@ -146,6 +183,7 @@ if refresh_clicked:
     load_series.clear()
     load_regime_frame.clear()
     load_global_index_frame.clear()
+    load_credit_index_frame.clear()
 
 
 def render_single_series_tab() -> None:
@@ -514,20 +552,22 @@ def render_regime_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Global Indices tab
+# Instrument regime tabs (Global Indices, Credit Indices) - both pick one
+# instrument from a dict and show the same yield-curve/dollar regime
+# treatment as the S&P 500 tab, minus the Fed regime.
 # ---------------------------------------------------------------------------
-def render_global_indices_tab() -> None:
-    st.info(
-        "Russell 2000 isn't included: FRED has no Russell 2000 price index "
-        "(only a volatility index, RVXCLS, which isn't usable for returns)."
-    )
+def render_instrument_regime_tab(
+    indices: dict, loader, key_prefix: str, banner: str = None
+) -> None:
+    if banner:
+        st.info(banner)
 
-    index_key = st.selectbox("Index", list(GLOBAL_INDICES.keys()))
-    meta = GLOBAL_INDICES[index_key]
+    index_key = st.selectbox("Index", list(indices.keys()), key=f"{key_prefix}_select")
+    meta = indices[index_key]
 
     with st.spinner(f"Loading {index_key} data from FRED..."):
         try:
-            gf = load_global_index_frame(index_key, bypass_cache=refresh_clicked)
+            gf = loader(index_key, bypass_cache=refresh_clicked)
         except ValueError as e:
             st.error(str(e))
             return
@@ -538,6 +578,8 @@ def render_global_indices_tab() -> None:
 
     if meta["is_proxy"]:
         st.warning(meta["note"])
+    else:
+        st.caption(meta["note"])
 
     st.caption(
         f"{len(gf):,} {meta['period_noun']} classified, "
@@ -581,14 +623,39 @@ def render_global_indices_tab() -> None:
         price_col=price_col,
         periods_per_year=periods_per_year,
         period_noun=period_noun,
-        key_prefix=f"global_{price_col}",
+        # Stable per-tab key (not derived from price_col) so the metric
+        # choice persists when the user switches instruments within a tab,
+        # rather than spawning a new radio widget (and losing the choice)
+        # every time.
+        key_prefix=key_prefix,
     )
 
 
-tab1, tab2, tab3 = st.tabs(["Single Series", "Regime Analysis", "Global Indices"])
+def render_global_indices_tab() -> None:
+    render_instrument_regime_tab(
+        GLOBAL_INDICES,
+        load_global_index_frame,
+        key_prefix="global",
+        banner="Russell 2000 isn't included: FRED has no Russell 2000 price "
+        "index (only a volatility index, RVXCLS, which isn't usable for "
+        "returns).",
+    )
+
+
+def render_credit_indices_tab() -> None:
+    render_instrument_regime_tab(
+        CREDIT_INDICES, load_credit_index_frame, key_prefix="credit"
+    )
+
+
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Single Series", "Regime Analysis", "Global Indices", "Credit Indices"]
+)
 with tab1:
     render_single_series_tab()
 with tab2:
     render_regime_tab()
 with tab3:
     render_global_indices_tab()
+with tab4:
+    render_credit_indices_tab()
