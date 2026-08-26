@@ -17,7 +17,7 @@ from regimes import (
     regime_periods,
 )
 
-st.set_page_config(page_title="Nyasha Mugabe Dashboard", layout="wide")
+st.set_page_config(page_title="Nyasha Mugabe Macro Regime Dashboard", layout="wide")
 
 # Preset series. Dict order fixes each series' color/style identity so it
 # doesn't shift when the selection changes.
@@ -143,7 +143,7 @@ def load_credit_index_frame(index_key: str, bypass_cache: bool = False) -> pd.Da
     return build_two_factor_regime_frame(raw)
 
 
-st.title("Nyasha Mugabe Dashboard")
+st.title("Nyasha Mugabe Macro Regime Dashboard")
 
 # ---------------------------------------------------------------------------
 # Sidebar (controls for the Single Series tab)
