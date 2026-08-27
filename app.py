@@ -176,6 +176,7 @@ def load_relative_value_frame(bypass_cache: bool = False) -> pd.DataFrame:
 
 
 st.title("Nyasha Mugabe Macro Regime Dashboard")
+st.markdown("*Analysis of Equity and Credit returns in different macroeconomic regimes*")
 
 # ---------------------------------------------------------------------------
 # Sidebar (controls for the Single Series tab)
