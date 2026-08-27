@@ -683,7 +683,11 @@ def render_credit_indices_tab() -> None:
 # ---------------------------------------------------------------------------
 # Relative Value tab: S&P 500 vs. credit indices, by regime
 # ---------------------------------------------------------------------------
-def _rv_grouped_bar(rv: pd.DataFrame, group_col: str, order: list[str], title: str) -> go.Figure:
+def _rv_grouped_bar(rv: pd.DataFrame, group_col: str, order: list[str]) -> go.Figure:
+    # No in-figure title here on purpose: the panel label is rendered via
+    # st.markdown above the chart instead, so it doesn't compete with the
+    # legend for the same top strip of the figure (that collision is what
+    # made the title and legend render crammed onto one overlapping line).
     fig = go.Figure()
     for label, sid in RV_INSTRUMENTS.items():
         stats = _ordered_stats(rv, group_col, order, price_col=sid, periods_per_year=TRADING_DAYS_PER_YEAR)
@@ -697,10 +701,10 @@ def _rv_grouped_bar(rv: pd.DataFrame, group_col: str, order: list[str], title: s
         )
     fig.update_layout(
         barmode="group",
-        title=title,
         yaxis_title="Annualized return (%)",
-        height=400,
-        margin=dict(l=10, r=10, t=40, b=10),
+        yaxis=dict(rangemode="tozero"),
+        height=420,
+        margin=dict(l=10, r=10, t=50, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     return fig
@@ -777,14 +781,16 @@ def render_relative_value_tab() -> None:
     st.subheader("Annualized return by regime: S&P 500 vs. credit")
     col1, col2 = st.columns(2)
     with col1:
+        st.markdown("**Yield curve regime**")
         st.plotly_chart(
-            _rv_grouped_bar(rv, "yield_curve_regime", YIELD_CURVE_ORDER, "Yield curve regime"),
+            _rv_grouped_bar(rv, "yield_curve_regime", YIELD_CURVE_ORDER),
             width="stretch",
             theme="streamlit",
         )
     with col2:
+        st.markdown("**Dollar regime**")
         st.plotly_chart(
-            _rv_grouped_bar(rv, "dollar_regime", DOLLAR_ORDER, "Dollar regime"),
+            _rv_grouped_bar(rv, "dollar_regime", DOLLAR_ORDER),
             width="stretch",
             theme="streamlit",
         )
