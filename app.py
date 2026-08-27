@@ -15,10 +15,11 @@ from regimes import (
     DOLLAR_ORDER,
     FED_ORDER,
     MONTHS_PER_YEAR,
+    TERM_PREMIUM_ORDER,
     TRADING_DAYS_PER_YEAR,
     YIELD_CURVE_ORDER,
     build_regime_frame,
-    build_two_factor_regime_frame,
+    build_three_factor_regime_frame,
     compute_regime_stats,
     regime_periods,
 )
@@ -35,6 +36,7 @@ PRESETS = {
     "FEDFUNDS": "Fed Funds Rate",
     "CPIAUCSL": "CPI",
     "DTWEXBGS": "Nominal Dollar Index",
+    "THREEFYTP10": "10Y Term Premium",
 }
 
 # Validated categorical palette (see dataviz skill), fixed order.
@@ -72,10 +74,10 @@ def load_regime_frame(bypass_cache: bool = False) -> pd.DataFrame:
     return build_regime_frame(raw)
 
 
-# Global equity indices, classified on the same yield-curve and dollar
-# regimes as S&P 500 (no Fed regime for these). FRED has no native Russell
-# 2000 price index (only a volatility index), so it's left out entirely
-# rather than faked with an unrelated proxy.
+# Global equity indices, classified on the same yield-curve, dollar, and
+# term-premium regimes as S&P 500 (no Fed regime for these). FRED has no
+# native Russell 2000 price index (only a volatility index), so it's left
+# out entirely rather than faked with an unrelated proxy.
 GLOBAL_INDICES = {
     "Nikkei 225": dict(
         series_id="NIKKEI225",
@@ -109,13 +111,13 @@ GLOBAL_INDICES = {
 def load_global_index_frame(index_key: str, bypass_cache: bool = False) -> pd.DataFrame:
     series_id = GLOBAL_INDICES[index_key]["series_id"]
     raw = get_aligned_series(series_id, use_cache=not bypass_cache, include_fed=False)
-    return build_two_factor_regime_frame(raw)
+    return build_three_factor_regime_frame(raw)
 
 
-# ICE BofA total-return indices, classified on the same yield-curve and
-# dollar regimes. All three only have history on FRED back to 2023-08-28,
-# so the analysis window is short - the date range shown in the tab makes
-# that visible rather than hiding it.
+# ICE BofA total-return indices, classified on the same yield-curve,
+# dollar, and term-premium regimes. All three only have history on FRED
+# back to 2023-08-28, so the analysis window is short - the date range
+# shown in the tab makes that visible rather than hiding it.
 CREDIT_INDICES = {
     "US High Yield (ICE BofA)": dict(
         series_id="BAMLHYH0A0HYM2TRIV",
@@ -146,7 +148,7 @@ CREDIT_INDICES = {
 def load_credit_index_frame(index_key: str, bypass_cache: bool = False) -> pd.DataFrame:
     series_id = CREDIT_INDICES[index_key]["series_id"]
     raw = get_aligned_series(series_id, use_cache=not bypass_cache, include_fed=False)
-    return build_two_factor_regime_frame(raw)
+    return build_three_factor_regime_frame(raw)
 
 
 # S&P 500 vs. the three ICE BofA credit indices, all aligned onto SP500's
@@ -172,7 +174,7 @@ RV_COLORS = {
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_relative_value_frame(bypass_cache: bool = False) -> pd.DataFrame:
     raw = get_relative_value_inputs(use_cache=not bypass_cache)
-    return build_two_factor_regime_frame(raw)
+    return build_three_factor_regime_frame(raw)
 
 
 st.title("Nyasha Mugabe Macro Regime Dashboard")
@@ -504,7 +506,7 @@ def render_regime_tab() -> None:
     )
 
     st.subheader("S&P 500 return by single-factor regime")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         stats = _ordered_stats(rf, "yield_curve_regime", YIELD_CURVE_ORDER)
         st.plotly_chart(
@@ -526,6 +528,13 @@ def render_regime_tab() -> None:
             width="stretch",
             theme="streamlit",
         )
+    with col4:
+        stats = _ordered_stats(rf, "term_premium_regime", TERM_PREMIUM_ORDER)
+        st.plotly_chart(
+            _factor_bar(stats, "term_premium_regime", TERM_PREMIUM_ORDER, "Term premium"),
+            width="stretch",
+            theme="streamlit",
+        )
     st.caption(
         "Bar labels show the share of trading days in that regime — "
         "treat thin bars' return figures cautiously; small samples are noisy."
@@ -540,7 +549,7 @@ def render_regime_tab() -> None:
         key_prefix="sp500",
     )
 
-    with st.expander("All regime combinations (yield curve / dollar / Fed), aggregated"):
+    with st.expander("All regime combinations (yield curve / dollar / Fed / term premium), aggregated"):
         combo = compute_regime_stats(rf, "regime_label").sort_values(
             "pct_of_days", ascending=False
         )
@@ -625,7 +634,7 @@ def render_instrument_regime_tab(
     period_noun = meta["period_noun"]
 
     st.subheader(f"{index_key} return by regime")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         stats = _ordered_stats(
             gf, "yield_curve_regime", YIELD_CURVE_ORDER, price_col, periods_per_year
@@ -643,6 +652,17 @@ def render_instrument_regime_tab(
         )
         st.plotly_chart(
             _factor_bar(stats, "dollar_regime", DOLLAR_ORDER, "Dollar", period_noun),
+            width="stretch",
+            theme="streamlit",
+        )
+    with col3:
+        stats = _ordered_stats(
+            gf, "term_premium_regime", TERM_PREMIUM_ORDER, price_col, periods_per_year
+        )
+        st.plotly_chart(
+            _factor_bar(
+                stats, "term_premium_regime", TERM_PREMIUM_ORDER, "Term premium", period_noun
+            ),
             width="stretch",
             theme="streamlit",
         )
@@ -781,7 +801,7 @@ def render_relative_value_tab() -> None:
     )
 
     st.subheader("Annualized return by regime: S&P 500 vs. credit")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("**Yield curve regime**")
         st.plotly_chart(
@@ -796,10 +816,18 @@ def render_relative_value_tab() -> None:
             width="stretch",
             theme="streamlit",
         )
+    with col3:
+        st.markdown("**Term premium regime**")
+        st.plotly_chart(
+            _rv_grouped_bar(rv, "term_premium_regime", TERM_PREMIUM_ORDER),
+            width="stretch",
+            theme="streamlit",
+        )
     st.caption(
-        "Same yield-curve and dollar regime definitions used across the "
-        "dashboard. Thin buckets are noisy - check the sample-size columns "
-        "in the table below before reading too much into any one figure."
+        "Same yield-curve, dollar, and term-premium regime definitions "
+        "used across the dashboard. Thin buckets are noisy - check the "
+        "sample-size columns in the table below before reading too much "
+        "into any one figure."
     )
 
     st.subheader("Relative value: S&P 500 minus credit, by regime")
@@ -843,6 +871,8 @@ DATA_SOURCES = [
          used_in="Single Series; dollar regime driver, via its 200-day moving average (every regime tab)"),
     dict(series_id="FEDFUNDS", label="Effective Fed Funds Rate", freq="Monthly",
          used_in="Single Series; Fed regime driver (Regime Analysis tab only)"),
+    dict(series_id="THREEFYTP10", label="NY Fed ACM 10-Year Treasury Term Premium", freq="Daily",
+         used_in="Single Series; term-premium regime driver (every regime tab)"),
     dict(series_id="CPIAUCSL", label="CPI, All Urban Consumers", freq="Monthly", used_in="Single Series"),
     dict(series_id="BAMLH0A0HYM2", label="ICE BofA US High Yield Index OAS (spread)", freq="Daily", used_in="Single Series"),
     dict(series_id="NIKKEI225", label="Nikkei 225", freq="Daily", used_in="Global Indices"),

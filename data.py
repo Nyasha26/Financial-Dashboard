@@ -84,15 +84,22 @@ def get_dollar_ma_series(window=200, start_date=None, end_date=None, use_cache=T
 
 def get_regime_drivers(dollar_ma_window=200, start_date=None, end_date=None, use_cache=True):
     """
-    T10Y2Y and DTWEXBGS (+ its moving average) as one frame, ready to be
-    aligned onto any target index's calendar via merge_asof.
+    T10Y2Y, DTWEXBGS (+ its moving average), and THREEFYTP10 (NY Fed ACM
+    10-year term premium) as one frame, ready to be aligned onto any
+    target index's calendar via merge_asof. This is the single place all
+    regime drivers are assembled, so adding a driver here propagates it to
+    every tab's regime frame automatically.
     """
     t10y2y = get_series("T10Y2Y", start_date, end_date, use_cache=use_cache)
     t10y2y = t10y2y.rename(columns={"value": "T10Y2Y"}).sort_values("date")
 
     dxy = get_dollar_ma_series(dollar_ma_window, start_date, end_date, use_cache=use_cache)
 
+    term_premium = get_series("THREEFYTP10", start_date, end_date, use_cache=use_cache)
+    term_premium = term_premium.rename(columns={"value": "THREEFYTP10"}).sort_values("date")
+
     drivers = pd.merge_asof(t10y2y, dxy, on="date", direction="backward")
+    drivers = pd.merge_asof(drivers, term_premium, on="date", direction="backward")
     return drivers.dropna().reset_index(drop=True)
 
 
@@ -114,9 +121,9 @@ def get_aligned_series(
     published driver value as of that date.
 
     Returns a DataFrame with columns
-    [date, <target_ids...>, T10Y2Y, DTWEXBGS, DTWEXBGS_MA] (+ FEDFUNDS if
-    include_fed=True). dropna() at the end means the panel is naturally
-    bounded by whichever target has the shortest history.
+    [date, <target_ids...>, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, THREEFYTP10]
+    (+ FEDFUNDS if include_fed=True). dropna() at the end means the panel
+    is naturally bounded by whichever target has the shortest history.
     """
     if isinstance(target_ids, str):
         target_ids = [target_ids]
@@ -142,11 +149,11 @@ def get_aligned_series(
 
 def get_regime_inputs(start_date=None, end_date=None, use_cache=True):
     """
-    Pull T10Y2Y, DTWEXBGS, FEDFUNDS and SP500 and align them on SP500's
-    trading-day calendar.
+    Pull T10Y2Y, DTWEXBGS, THREEFYTP10, FEDFUNDS and SP500 and align them
+    on SP500's trading-day calendar.
 
     Returns a DataFrame with columns
-    [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, FEDFUNDS].
+    [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, THREEFYTP10, FEDFUNDS].
     """
     return get_aligned_series(
         "SP500", start_date, end_date, use_cache=use_cache, include_fed=True
@@ -170,7 +177,7 @@ def get_relative_value_inputs(start_date=None, end_date=None, use_cache=True):
 
     Returns a DataFrame with columns
     [date, SP500, BAMLHYH0A0HYM2TRIV, BAMLCC0A0CMTRIV, BAMLEMCBPITRIV,
-    T10Y2Y, DTWEXBGS, DTWEXBGS_MA].
+    T10Y2Y, DTWEXBGS, DTWEXBGS_MA, THREEFYTP10].
     """
     return get_aligned_series(
         list(RELATIVE_VALUE_INSTRUMENTS), start_date, end_date, use_cache=use_cache

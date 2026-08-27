@@ -10,6 +10,7 @@ FED_HOLD_THRESHOLD = 0.10  # pp change over the lookback treated as "roughly fla
 YIELD_CURVE_ORDER = ["Inverted", "Flattening", "Steep"]
 DOLLAR_ORDER = ["Strong Dollar", "Weak Dollar"]
 FED_ORDER = ["Cutting", "Hold", "Hiking"]
+TERM_PREMIUM_ORDER = ["Negative", "Low", "Elevated"]
 
 
 def _as_of_n_days_ago(df: pd.DataFrame, column: str, days: int) -> np.ndarray:
@@ -51,6 +52,22 @@ def classify_dollar_regime(dtwexbgs: pd.Series, dtwexbgs_ma: pd.Series) -> pd.Ca
     return pd.Categorical(values, categories=DOLLAR_ORDER, ordered=True)
 
 
+def classify_term_premium_regime(term_premium: pd.Series) -> pd.Categorical:
+    """
+    THREEFYTP10 (NY Fed ACM 10-year term premium), classified on the same
+    breakpoints as the yield-curve regime (<0, 0-0.5, >0.5) since both are
+    percentage-point spreads over a similar broad range - keeps the
+    threshold convention consistent rather than data-mining a bespoke cut
+    for this series.
+    """
+    values = np.select(
+        [term_premium < 0, term_premium <= 0.5],
+        ["Negative", "Low"],
+        default="Elevated",
+    )
+    return pd.Categorical(values, categories=TERM_PREMIUM_ORDER, ordered=True)
+
+
 def classify_fed_regime(
     df: pd.DataFrame,
     lookback_days: int = FED_LOOKBACK_DAYS,
@@ -68,17 +85,19 @@ def classify_fed_regime(
 
 def build_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Takes the aligned [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA, FEDFUNDS]
-    frame from data.get_regime_inputs and adds regime classification
-    columns (yield curve, dollar, Fed, and the combined label). Rows that
-    fall in the classifiers' burn-in window are dropped.
+    Takes the aligned [date, SP500, T10Y2Y, DTWEXBGS, DTWEXBGS_MA,
+    THREEFYTP10, FEDFUNDS] frame from data.get_regime_inputs and adds
+    regime classification columns (yield curve, dollar, Fed, term premium,
+    and the combined label). Rows that fall in the classifiers' burn-in
+    window are dropped.
     """
     out = df.copy()
     out["yield_curve_regime"] = classify_yield_curve_regime(out["T10Y2Y"])
     out["dollar_regime"] = classify_dollar_regime(out["DTWEXBGS"], out["DTWEXBGS_MA"])
     out["fed_regime"] = classify_fed_regime(out)
+    out["term_premium_regime"] = classify_term_premium_regime(out["THREEFYTP10"])
     out = out.dropna(
-        subset=["yield_curve_regime", "dollar_regime", "fed_regime"]
+        subset=["yield_curve_regime", "dollar_regime", "fed_regime", "term_premium_regime"]
     ).reset_index(drop=True)
 
     out["regime_label"] = (
@@ -87,20 +106,25 @@ def build_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
         + out["dollar_regime"].astype(str)
         + " / "
         + out["fed_regime"].astype(str)
+        + " / "
+        + out["term_premium_regime"].astype(str)
     )
     return out
 
 
-def build_two_factor_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
+def build_three_factor_regime_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Like build_regime_frame but classifies only the yield-curve and dollar
-    regimes (no Fed regime, no combined label) - for indices where the
-    Fed-funds factor isn't part of the analysis.
+    Like build_regime_frame but classifies yield-curve, dollar, and term-
+    premium regimes only (no Fed regime, no combined label) - for
+    instruments where the Fed-funds factor isn't part of the analysis.
     """
     out = df.copy()
     out["yield_curve_regime"] = classify_yield_curve_regime(out["T10Y2Y"])
     out["dollar_regime"] = classify_dollar_regime(out["DTWEXBGS"], out["DTWEXBGS_MA"])
-    out = out.dropna(subset=["yield_curve_regime", "dollar_regime"]).reset_index(drop=True)
+    out["term_premium_regime"] = classify_term_premium_regime(out["THREEFYTP10"])
+    out = out.dropna(
+        subset=["yield_curve_regime", "dollar_regime", "term_premium_regime"]
+    ).reset_index(drop=True)
     return out
 
 
