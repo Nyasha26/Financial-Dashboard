@@ -20,6 +20,7 @@ from regimes import (
     YIELD_CURVE_ORDER,
     build_regime_frame,
     build_three_factor_regime_frame,
+    compute_beta,
     compute_regime_stats,
     regime_periods,
 )
@@ -177,6 +178,24 @@ def load_relative_value_frame(bypass_cache: bool = False) -> pd.DataFrame:
     return build_three_factor_regime_frame(raw)
 
 
+# Regime drivers, sized to the move requested for the Beta tab. T10Y2Y,
+# THREEFYTP10, and FEDFUNDS are percentage-point spreads/rates (1bp =
+# 0.01); DTWEXBGS is an index level, so "$1" is read as a 1-point move.
+BETA_DRIVERS = {
+    "T10Y2Y": dict(name="Yield curve", move_size=0.01, move_label="1bp"),
+    "DTWEXBGS": dict(name="Dollar index", move_size=1.0, move_label="$1"),
+    "THREEFYTP10": dict(name="Term premium", move_size=0.01, move_label="1bp"),
+    "FEDFUNDS": dict(name="Fed funds", move_size=0.01, move_label="1bp"),
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_beta_frame(bypass_cache: bool = False) -> pd.DataFrame:
+    return get_aligned_series(
+        list(RV_INSTRUMENTS.values()), use_cache=not bypass_cache, include_fed=True
+    )
+
+
 st.title("Nyasha Mugabe Macro Regime Dashboard")
 st.markdown("*Analysis of Equity and Credit returns in different macroeconomic regimes*")
 
@@ -220,6 +239,7 @@ if refresh_clicked:
     load_global_index_frame.clear()
     load_credit_index_frame.clear()
     load_relative_value_frame.clear()
+    load_beta_frame.clear()
 
 
 def render_single_series_tab() -> None:
@@ -853,6 +873,134 @@ def render_relative_value_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Beta tab: sensitivity of S&P 500 and credit indices to a small move in
+# each regime driver
+# ---------------------------------------------------------------------------
+def _beta_table(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for inst_label, price_col in RV_INSTRUMENTS.items():
+        for driver_col, meta in BETA_DRIVERS.items():
+            result = compute_beta(df, price_col, driver_col)
+            beta = result["beta"]
+            impact_bps = beta * meta["move_size"] * 100 if pd.notna(beta) else float("nan")
+            rows.append(
+                {
+                    "instrument": inst_label,
+                    "driver": f"{meta['name']} ({meta['move_label']})",
+                    "impact_bps": impact_bps,
+                    "r_squared": result["r_squared"],
+                    "n": result["n"],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_beta_tab() -> None:
+    with st.spinner("Loading beta data from FRED..."):
+        try:
+            df = load_beta_frame(bypass_cache=refresh_clicked)
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+    if df.empty:
+        st.info(
+            "Not enough overlapping history yet across S&P 500 and the "
+            "credit indices to compute sensitivities."
+        )
+        return
+
+    st.caption(
+        "S&P 500 and the three ICE BofA credit indices, aligned onto the "
+        "same calendar and bounded by the credit indices' shorter FRED "
+        "history (back to 2023-08-28), so every instrument's beta is "
+        f"measured over the exact same window. Currently {len(df):,} "
+        f"trading days, {df['date'].min().date()} - {df['date'].max().date()}."
+    )
+    st.markdown(
+        "Each cell is a simple linear beta: the instrument's daily % "
+        "return per 1-unit move in the driver (1bp for a rate/spread, $1 "
+        "for the dollar index), expressed in basis points of return. "
+        "Computed only on days the driver actually moved, so Fed funds - "
+        "which only changes a handful of times a year - isn't diluted by "
+        "the many flat days forward-filled in between."
+    )
+
+    beta_df = _beta_table(df)
+    driver_order = [f"{meta['name']} ({meta['move_label']})" for meta in BETA_DRIVERS.values()]
+    instrument_order = list(RV_INSTRUMENTS.keys())
+
+    impact_pivot = beta_df.pivot(index="instrument", columns="driver", values="impact_bps")
+    impact_pivot = impact_pivot.reindex(index=instrument_order, columns=driver_order)
+    n_pivot = beta_df.pivot(index="instrument", columns="driver", values="n")
+    n_pivot = n_pivot.reindex(index=instrument_order, columns=driver_order)
+    r2_pivot = beta_df.pivot(index="instrument", columns="driver", values="r_squared")
+    r2_pivot = r2_pivot.reindex(index=instrument_order, columns=driver_order)
+
+    zmax = float(pd.Series(impact_pivot.values.flatten()).abs().max())
+    zmax = zmax if zmax and pd.notna(zmax) else 1.0
+
+    cell_text = [
+        [f"{v:+.1f}" if pd.notna(v) else "n/a" for v in row]
+        for row in impact_pivot.values
+    ]
+    customdata = [
+        [[n_pivot.iloc[r, c], r2_pivot.iloc[r, c]] for c in range(len(driver_order))]
+        for r in range(len(instrument_order))
+    ]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=impact_pivot.values,
+            x=impact_pivot.columns.tolist(),
+            y=impact_pivot.index.tolist(),
+            text=cell_text,
+            texttemplate="%{text}",
+            customdata=customdata,
+            hovertemplate=(
+                "%{y} / %{x}<br>Impact: %{z:+.2f} bps"
+                "<br>n=%{customdata[0]}, R²=%{customdata[1]:.2f}"
+                "<extra></extra>"
+            ),
+            colorscale="RdBu",
+            zmid=0,
+            zmin=-zmax,
+            zmax=zmax,
+            colorbar=dict(title="bps"),
+        )
+    )
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_title="Driver (move size shown in header)",
+        yaxis_title="Instrument",
+    )
+    st.plotly_chart(fig, width="stretch", theme="streamlit")
+    st.caption(
+        "Hover a cell for sample size (n) and R². Fed funds only "
+        "moves a handful of times within this window (n is often in the "
+        "single or low double digits) - treat that column as much less "
+        "statistically reliable than the daily-moving drivers."
+    )
+
+    with st.expander("Full detail: beta, R², sample size"):
+        detail = beta_df.rename(
+            columns={
+                "instrument": "Instrument",
+                "driver": "Driver",
+                "impact_bps": "Impact (bps)",
+                "r_squared": "R²",
+                "n": "N",
+            }
+        )
+        st.dataframe(
+            detail.style.format({"Impact (bps)": "{:+.2f}", "R²": "{:.3f}"}),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Formulas tab (formulas, data sources, and the live source code)
 # ---------------------------------------------------------------------------
 # Every FRED series referenced anywhere in the app, kept as one explicit
@@ -866,13 +1014,13 @@ DATA_SOURCES = [
     dict(series_id="DGS10", label="10Y Treasury Yield", freq="Daily", used_in="Single Series"),
     dict(series_id="DGS2", label="2Y Treasury Yield", freq="Daily", used_in="Single Series"),
     dict(series_id="T10Y2Y", label="10Y-2Y Treasury Spread", freq="Daily",
-         used_in="Single Series; yield-curve regime driver (every regime tab)"),
+         used_in="Single Series; yield-curve regime driver (every regime tab); Beta"),
     dict(series_id="DTWEXBGS", label="Trade-Weighted US Dollar Index, Broad, Nominal", freq="Daily",
-         used_in="Single Series; dollar regime driver, via its 200-day moving average (every regime tab)"),
+         used_in="Single Series; dollar regime driver, via its 200-day moving average (every regime tab); Beta"),
     dict(series_id="FEDFUNDS", label="Effective Fed Funds Rate", freq="Monthly",
-         used_in="Single Series; Fed regime driver (Regime Analysis tab only)"),
+         used_in="Single Series; Fed regime driver (Regime Analysis tab only); Beta"),
     dict(series_id="THREEFYTP10", label="NY Fed ACM 10-Year Treasury Term Premium", freq="Daily",
-         used_in="Single Series; term-premium regime driver (every regime tab)"),
+         used_in="Single Series; term-premium regime driver (every regime tab); Beta"),
     dict(series_id="CPIAUCSL", label="CPI, All Urban Consumers", freq="Monthly", used_in="Single Series"),
     dict(series_id="BAMLH0A0HYM2", label="ICE BofA US High Yield Index OAS (spread)", freq="Daily", used_in="Single Series"),
     dict(series_id="NIKKEI225", label="Nikkei 225", freq="Daily", used_in="Global Indices"),
@@ -1112,13 +1260,14 @@ CREATE INDEX idx_regime_period_dates ON regime_period(start_date, end_date);''',
         st.code(_read_source_file("data.py"), language="python")
 
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     [
         "Single Series",
         "Regime Analysis",
         "Global Indices",
         "Credit Indices",
         "Relative Value",
+        "Beta",
         "Methodology",
     ]
 )
@@ -1133,4 +1282,6 @@ with tab4:
 with tab5:
     render_relative_value_tab()
 with tab6:
+    render_beta_tab()
+with tab7:
     render_formulas_tab()

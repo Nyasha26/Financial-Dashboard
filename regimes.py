@@ -192,3 +192,39 @@ def regime_periods(df: pd.DataFrame, label_col: str = "regime_label") -> pd.Data
 
     periods = pd.DataFrame(rows)
     return periods.sort_values("start_date", ascending=False).reset_index(drop=True)
+
+
+def compute_beta(df: pd.DataFrame, price_col: str, driver_col: str) -> dict:
+    """
+    Simple OLS beta of `price_col`'s daily % return on `driver_col`'s
+    daily level change (not % change - a driver like T10Y2Y or FEDFUNDS
+    can be zero or negative, where % change is undefined or distorted).
+
+    Only rows where the driver actually moved are used, so a
+    forward-filled monthly series (FEDFUNDS) isn't diluted by the many
+    zero-change days between its real, monthly updates - without this,
+    a coarser-cadence driver's beta would be pulled toward zero purely
+    because most "days" it's compared against didn't really move.
+
+    beta is in "% instrument return per 1-unit driver change" - e.g. per
+    1 percentage point for a rate/spread, per 1 index point for the
+    dollar index. Returns {"beta", "r_squared", "n"}.
+    """
+    d = pd.DataFrame(
+        {
+            "return": df[price_col].pct_change() * 100,
+            "driver_change": df[driver_col].diff(),
+        }
+    ).dropna()
+    d = d[d["driver_change"] != 0]
+
+    if len(d) < 2 or d["driver_change"].var() == 0:
+        return {"beta": np.nan, "r_squared": np.nan, "n": len(d)}
+
+    cov = np.cov(d["driver_change"], d["return"])[0, 1]
+    beta = cov / d["driver_change"].var()
+
+    corr = d["driver_change"].corr(d["return"])
+    r_squared = corr**2 if pd.notna(corr) else np.nan
+
+    return {"beta": beta, "r_squared": r_squared, "n": len(d)}
