@@ -1011,6 +1011,91 @@ def render_formulas_tab() -> None:
     )
 
     st.divider()
+    st.subheader("Reference database schema")
+    st.markdown(
+        "The app doesn't run a database today - the CSV cache above is "
+        "all there is. This is the schema **if** the data model here were "
+        "backed by one: how the raw series, regime classifications, and "
+        "computed stats would normalize into tables. SQLite-flavored DDL "
+        "(runs as-is in SQLite; swap `INTEGER PRIMARY KEY AUTOINCREMENT` "
+        "for `SERIAL PRIMARY KEY` and `BOOLEAN`/`TIMESTAMP` are native "
+        "types for Postgres)."
+    )
+    st.caption(
+        "Also worth knowing: this app runs on Streamlit Community Cloud, "
+        "whose filesystem is ephemeral - a SQLite file written there would "
+        "be wiped on every redeploy/restart, so a *real* persistent "
+        "version of this would need Postgres (or similar) with its own "
+        "hosted instance, not SQLite."
+    )
+    st.code(
+        '''-- Raw FRED series observations (one row per series per date;
+-- mirrors data.get_series's per-series CSV cache)
+CREATE TABLE fred_series_value (
+    series_id   TEXT    NOT NULL,   -- FRED series ID, e.g. 'SP500', 'T10Y2Y'
+    date        DATE    NOT NULL,
+    value       REAL    NOT NULL,
+    PRIMARY KEY (series_id, date)
+);
+
+-- Static metadata about each series (mirrors app.py's DATA_SOURCES table)
+CREATE TABLE fred_series_meta (
+    series_id    TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    native_freq  TEXT NOT NULL CHECK (native_freq IN ('Daily', 'Monthly', 'Quarterly')),
+    is_proxy     BOOLEAN NOT NULL DEFAULT 0,
+    proxy_note   TEXT
+);
+
+-- Day-level (or month-level, for monthly instruments) regime classification
+-- per target instrument (mirrors regimes.build_regime_frame /
+-- build_three_factor_regime_frame)
+CREATE TABLE regime_day (
+    target_series_id    TEXT NOT NULL,  -- the instrument being classified, e.g. 'SP500'
+    date                 DATE NOT NULL,
+    yield_curve_regime    TEXT NOT NULL CHECK (yield_curve_regime IN ('Inverted','Flattening','Steep')),
+    dollar_regime          TEXT NOT NULL CHECK (dollar_regime IN ('Strong Dollar','Weak Dollar')),
+    term_premium_regime    TEXT NOT NULL CHECK (term_premium_regime IN ('Negative','Low','Elevated')),
+    fed_regime              TEXT CHECK (fed_regime IN ('Cutting','Hold','Hiking')),  -- NULL outside the S&P 500 tab
+    regime_label             TEXT NOT NULL,  -- e.g. 'Steep / Weak Dollar / Hold / Low'
+    PRIMARY KEY (target_series_id, date),
+    FOREIGN KEY (target_series_id) REFERENCES fred_series_meta(series_id)
+);
+
+-- Precomputed regime-bucket statistics (mirrors compute_regime_stats)
+CREATE TABLE regime_stats (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_series_id    TEXT NOT NULL,
+    group_by             TEXT NOT NULL,  -- e.g. 'yield_curve_regime' or 'yield_curve_regime,dollar_regime'
+    regime_bucket         TEXT NOT NULL,  -- e.g. 'Steep' or 'Steep|Weak Dollar'
+    n_periods              INTEGER NOT NULL,
+    pct_of_periods          REAL NOT NULL,
+    annualized_return       REAL NOT NULL,
+    annualized_vol           REAL NOT NULL,
+    sharpe_like_ratio         REAL,
+    computed_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (target_series_id) REFERENCES fred_series_meta(series_id)
+);
+
+-- Contiguous regime periods (mirrors regimes.regime_periods)
+CREATE TABLE regime_period (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_series_id    TEXT NOT NULL,
+    regime_label          TEXT NOT NULL,
+    start_date             DATE NOT NULL,
+    end_date                 DATE NOT NULL,
+    trading_days              INTEGER NOT NULL,
+    return_pct                 REAL NOT NULL,
+    FOREIGN KEY (target_series_id) REFERENCES fred_series_meta(series_id)
+);
+
+CREATE INDEX idx_fred_series_value_date ON fred_series_value(date);
+CREATE INDEX idx_regime_day_label ON regime_day(regime_label);
+CREATE INDEX idx_regime_period_dates ON regime_period(start_date, end_date);''',
+        language="sql",
+    )
+
+    st.divider()
     st.subheader("Source code")
     st.markdown(
         "Read live from the app's own files at render time, so this is "
