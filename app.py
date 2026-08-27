@@ -822,8 +822,117 @@ def render_relative_value_tab() -> None:
     )
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Single Series", "Regime Analysis", "Global Indices", "Credit Indices", "Relative Value"]
+# ---------------------------------------------------------------------------
+# Formulas tab
+# ---------------------------------------------------------------------------
+def render_formulas_tab() -> None:
+    st.markdown(
+        "The exact math behind every annualized return, annualized "
+        "volatility, and Sharpe-like ratio shown across this dashboard "
+        "(implemented once, in `regimes.compute_regime_stats`, and reused "
+        "by every regime-analysis tab)."
+    )
+
+    st.subheader("1. Period return")
+    st.latex(r"r_t = \frac{P_t}{P_{t-1}} - 1")
+    st.markdown(
+        "The simple period-over-period % change of the price series "
+        "(`price_col.pct_change()`) - one value per trading day for a "
+        "daily instrument (S&P 500, Nikkei, the ICE BofA credit indices), "
+        "or per month for a monthly one (the FTSE/SSE OECD proxies)."
+    )
+
+    st.subheader("2. Annualized return")
+    st.latex(r"\text{Annualized Return} = \bar{r} \times N")
+    st.markdown(
+        "The **mean** period return within a regime bucket, scaled to a "
+        "yearly figure by $N$, the number of periods per year - **252** "
+        "for a daily series, **12** for a monthly one. This is a simple "
+        "(arithmetic) scaling, not compounded/geometric - that's what "
+        "lets a bucket made of scattered, non-contiguous days (a regime "
+        "can start and stop many times across the sample) still be "
+        "compared on equal footing, since there's no single continuous "
+        "holding period to compound over."
+    )
+
+    st.subheader("3. Annualized volatility")
+    st.latex(r"\text{Annualized Volatility} = \sigma_r \times \sqrt{N}")
+    st.markdown(
+        "The **sample standard deviation** of period returns within the "
+        "bucket (pandas' default, $n-1$ denominator), scaled by "
+        r"$\sqrt{N}$ - the standard square-root-of-time rule, which "
+        "assumes returns are roughly independent from one period to the "
+        "next."
+    )
+
+    st.subheader("4. Sharpe-like ratio")
+    st.latex(r"\text{Sharpe-like Ratio} = \frac{\text{Annualized Return}}{\text{Annualized Volatility}}")
+    st.warning(
+        "This is **return divided by volatility**, not a true Sharpe "
+        "ratio - no risk-free rate is subtracted from the return first. "
+        "It's a measure of return earned per unit of volatility within a "
+        "regime, not risk-adjusted excess return in the textbook sense."
+    )
+
+    st.subheader("5. Share of the sample (\"% of days\")")
+    st.latex(r"\%\ \text{of days} = \frac{n_{\text{bucket}}}{n_{\text{total}}} \times 100")
+    st.markdown(
+        "The fraction of the sample's periods that fall into a given "
+        "regime bucket. Shown next to every return figure across the "
+        "dashboard so a thin bucket (small $n_{\\text{bucket}}$, e.g. a "
+        "handful of days) doesn't get read with the same confidence as a "
+        "well-populated one."
+    )
+
+    st.divider()
+    st.subheader("Worked example, live")
+    example_regime = "Steep"
+    with st.spinner("Loading S&P 500 regime data..."):
+        try:
+            rf = load_regime_frame(bypass_cache=refresh_clicked)
+        except ValueError as e:
+            st.info(f"Couldn't load live data for the worked example: {e}")
+            rf = None
+
+    if rf is not None and not rf.empty:
+        stats = compute_regime_stats(
+            rf, "yield_curve_regime", price_col="SP500", periods_per_year=TRADING_DAYS_PER_YEAR
+        )
+        row = stats[stats["yield_curve_regime"] == example_regime].iloc[0]
+        n = int(row["n_days"])
+        ann_return = row["annualized_return"]
+        ann_vol = row["annualized_vol"]
+        sharpe = row["sharpe"]
+        mean_r = ann_return / TRADING_DAYS_PER_YEAR
+        std_r = ann_vol / (TRADING_DAYS_PER_YEAR**0.5)
+
+        st.markdown(
+            f"S&P 500, **{example_regime}** yield-curve regime, "
+            f"{n:,} trading days in the current sample ($N = 252$):"
+        )
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Mean daily return", f"{mean_r:+.3%}")
+        c2.metric("Daily std dev", f"{std_r:.3%}")
+        c3.metric(
+            "Annualized return", f"{ann_return:+.1%}", help=f"{mean_r:+.3%} x 252"
+        )
+        c4.metric(
+            "Annualized vol", f"{ann_vol:.1%}", help=f"{std_r:.3%} x sqrt(252)"
+        )
+        c5.metric(
+            "Sharpe-like ratio", f"{sharpe:+.2f}", help=f"{ann_return:+.1%} / {ann_vol:.1%}"
+        )
+
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    [
+        "Single Series",
+        "Regime Analysis",
+        "Global Indices",
+        "Credit Indices",
+        "Relative Value",
+        "Formulas",
+    ]
 )
 with tab1:
     render_single_series_tab()
@@ -835,3 +944,5 @@ with tab4:
     render_credit_indices_tab()
 with tab5:
     render_relative_value_tab()
+with tab6:
+    render_formulas_tab()
