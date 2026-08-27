@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -823,8 +824,41 @@ def render_relative_value_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Formulas tab
+# Formulas tab (formulas, data sources, and the live source code)
 # ---------------------------------------------------------------------------
+# Every FRED series referenced anywhere in the app, kept as one explicit
+# list rather than derived from the tab-specific dicts above - those only
+# capture what's *selectable* per tab, not the regime-driver series (T10Y2Y,
+# DTWEXBGS, FEDFUNDS) or SP500, which is used as the regime target but never
+# appears in the Single Series dropdown.
+DATA_SOURCES = [
+    dict(series_id="SP500", label="S&P 500", freq="Daily",
+         used_in="Regime Analysis, Relative Value (as the regime target - not in the Single Series dropdown)"),
+    dict(series_id="DGS10", label="10Y Treasury Yield", freq="Daily", used_in="Single Series"),
+    dict(series_id="DGS2", label="2Y Treasury Yield", freq="Daily", used_in="Single Series"),
+    dict(series_id="T10Y2Y", label="10Y-2Y Treasury Spread", freq="Daily",
+         used_in="Single Series; yield-curve regime driver (every regime tab)"),
+    dict(series_id="DTWEXBGS", label="Trade-Weighted US Dollar Index, Broad, Nominal", freq="Daily",
+         used_in="Single Series; dollar regime driver, via its 200-day moving average (every regime tab)"),
+    dict(series_id="FEDFUNDS", label="Effective Fed Funds Rate", freq="Monthly",
+         used_in="Single Series; Fed regime driver (Regime Analysis tab only)"),
+    dict(series_id="CPIAUCSL", label="CPI, All Urban Consumers", freq="Monthly", used_in="Single Series"),
+    dict(series_id="BAMLH0A0HYM2", label="ICE BofA US High Yield Index OAS (spread)", freq="Daily", used_in="Single Series"),
+    dict(series_id="NIKKEI225", label="Nikkei 225", freq="Daily", used_in="Global Indices"),
+    dict(series_id="SPASTT01GBM661N", label="OECD UK broad share-price index (FTSE 100 proxy)", freq="Monthly", used_in="Global Indices"),
+    dict(series_id="SPASTT01CNM661N", label="OECD China broad share-price index (SSE Composite proxy)", freq="Monthly", used_in="Global Indices"),
+    dict(series_id="BAMLHYH0A0HYM2TRIV", label="ICE BofA US High Yield Total Return Index", freq="Daily", used_in="Credit Indices, Relative Value"),
+    dict(series_id="BAMLCC0A0CMTRIV", label="ICE BofA US Corporate Total Return Index", freq="Daily", used_in="Credit Indices, Relative Value"),
+    dict(series_id="BAMLEMCBPITRIV", label="ICE BofA EM Corporate Total Return Index", freq="Daily", used_in="Credit Indices, Relative Value"),
+]
+
+
+def _read_source_file(filename: str) -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def render_formulas_tab() -> None:
     st.markdown(
         "The exact math behind every annualized return, annualized "
@@ -923,6 +957,44 @@ def render_formulas_tab() -> None:
             "Sharpe-like ratio", f"{sharpe:+.2f}", help=f"{ann_return:+.1%} / {ann_vol:.1%}"
         )
 
+    st.divider()
+    st.subheader("Data sources")
+    st.markdown("Every FRED series this dashboard pulls, and which tab(s) use it.")
+    st.dataframe(
+        pd.DataFrame(DATA_SOURCES).rename(
+            columns={
+                "series_id": "FRED series ID",
+                "label": "What it is",
+                "freq": "Native frequency",
+                "used_in": "Used in",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "There is no database - each series is pulled directly from the "
+        "FRED API (via `fredapi`) and cached to a local CSV per series/date "
+        "range for 24 hours (`data.py`'s `get_series`); nothing else is "
+        "stored or queried."
+    )
+
+    st.divider()
+    st.subheader("Source code")
+    st.markdown(
+        "Read live from the app's own files at render time, so this is "
+        "always exactly what's running - not a snapshot that can drift out "
+        "of sync with the code above."
+    )
+    with st.expander(
+        "regimes.py - regime classification, annualized return/vol/Sharpe, regime periods"
+    ):
+        st.code(_read_source_file("regimes.py"), language="python")
+    with st.expander(
+        "data.py - FRED fetch, disk caching, calendar alignment"
+    ):
+        st.code(_read_source_file("data.py"), language="python")
+
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     [
@@ -931,7 +1003,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         "Global Indices",
         "Credit Indices",
         "Relative Value",
-        "Formulas",
+        "Methodology",
     ]
 )
 with tab1:
