@@ -4,7 +4,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data import get_aligned_series, get_regime_inputs, get_series
+from data import (
+    get_aligned_series,
+    get_regime_inputs,
+    get_relative_value_inputs,
+    get_series,
+)
 from regimes import (
     DOLLAR_ORDER,
     FED_ORDER,
@@ -143,6 +148,32 @@ def load_credit_index_frame(index_key: str, bypass_cache: bool = False) -> pd.Da
     return build_two_factor_regime_frame(raw)
 
 
+# S&P 500 vs. the three ICE BofA credit indices, all aligned onto SP500's
+# calendar and bounded by the credit indices' shorter history, so the
+# comparison is over identical dates. Colors deliberately skip the
+# palette's 4th slot (yellow) - it's a documented failure pair with the
+# 2nd slot (orange) when both are visible at once, which a grouped bar
+# chart with all 4 instruments always does.
+RV_INSTRUMENTS = {
+    "S&P 500": "SP500",
+    "US High Yield": "BAMLHYH0A0HYM2TRIV",
+    "US Corporate": "BAMLCC0A0CMTRIV",
+    "EM Corporate": "BAMLEMCBPITRIV",
+}
+RV_COLORS = {
+    "S&P 500": CATEGORICAL_COLORS[0],  # blue
+    "US High Yield": CATEGORICAL_COLORS[1],  # orange
+    "US Corporate": CATEGORICAL_COLORS[2],  # aqua
+    "EM Corporate": CATEGORICAL_COLORS[7],  # red
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_relative_value_frame(bypass_cache: bool = False) -> pd.DataFrame:
+    raw = get_relative_value_inputs(use_cache=not bypass_cache)
+    return build_two_factor_regime_frame(raw)
+
+
 st.title("Nyasha Mugabe Macro Regime Dashboard")
 
 # ---------------------------------------------------------------------------
@@ -184,6 +215,7 @@ if refresh_clicked:
     load_regime_frame.clear()
     load_global_index_frame.clear()
     load_credit_index_frame.clear()
+    load_relative_value_frame.clear()
 
 
 def render_single_series_tab() -> None:
@@ -648,8 +680,144 @@ def render_credit_indices_tab() -> None:
     )
 
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Single Series", "Regime Analysis", "Global Indices", "Credit Indices"]
+# ---------------------------------------------------------------------------
+# Relative Value tab: S&P 500 vs. credit indices, by regime
+# ---------------------------------------------------------------------------
+def _rv_grouped_bar(rv: pd.DataFrame, group_col: str, order: list[str], title: str) -> go.Figure:
+    fig = go.Figure()
+    for label, sid in RV_INSTRUMENTS.items():
+        stats = _ordered_stats(rv, group_col, order, price_col=sid, periods_per_year=TRADING_DAYS_PER_YEAR)
+        fig.add_trace(
+            go.Bar(
+                name=label,
+                x=stats[group_col].astype(str),
+                y=stats["annualized_return"] * 100,
+                marker_color=RV_COLORS[label],
+            )
+        )
+    fig.update_layout(
+        barmode="group",
+        title=title,
+        yaxis_title="Annualized return (%)",
+        height=400,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
+
+
+def _rv_spread_table(rv: pd.DataFrame) -> pd.DataFrame:
+    group_cols = ["yield_curve_regime", "dollar_regime"]
+    sp_stats = compute_regime_stats(
+        rv, group_cols, price_col="SP500", periods_per_year=TRADING_DAYS_PER_YEAR
+    )
+    table = sp_stats[group_cols + ["pct_of_days", "n_days", "annualized_return"]].rename(
+        columns={"annualized_return": "S&P 500"}
+    )
+
+    credit_cols = []
+    for label, sid in RV_INSTRUMENTS.items():
+        if sid == "SP500":
+            continue
+        credit_stats = compute_regime_stats(
+            rv, group_cols, price_col=sid, periods_per_year=TRADING_DAYS_PER_YEAR
+        )
+        table = table.merge(
+            credit_stats[group_cols + ["annualized_return"]].rename(columns={"annualized_return": label}),
+            on=group_cols,
+        )
+        table[f"{label} spread"] = table["S&P 500"] - table[label]
+        credit_cols += [label, f"{label} spread"]
+
+    table = table[group_cols + ["pct_of_days", "n_days", "S&P 500"] + credit_cols]
+
+    order_index = {
+        (y, d): i
+        for i, (y, d) in enumerate((y, d) for y in YIELD_CURVE_ORDER for d in DOLLAR_ORDER)
+    }
+    table = (
+        table.assign(
+            _order=table.apply(
+                lambda r: order_index.get(
+                    (r["yield_curve_regime"], r["dollar_regime"]), 999
+                ),
+                axis=1,
+            )
+        )
+        .sort_values("_order")
+        .drop(columns="_order")
+        .reset_index(drop=True)
+    )
+    return table
+
+
+def render_relative_value_tab() -> None:
+    with st.spinner("Loading relative value data from FRED..."):
+        try:
+            rv = load_relative_value_frame(bypass_cache=refresh_clicked)
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+    if rv.empty:
+        st.info(
+            "Not enough overlapping history yet across S&P 500 and the "
+            "credit indices to run this comparison."
+        )
+        return
+
+    st.caption(
+        "S&P 500 vs. the three ICE BofA credit total-return indices, "
+        "compared over the exact same dates and regimes - the window is "
+        "bounded by the credit indices' shorter FRED history (back to "
+        f"2023-08-28). Currently {len(rv):,} trading days, "
+        f"{rv['date'].min().date()} - {rv['date'].max().date()}."
+    )
+
+    st.subheader("Annualized return by regime: S&P 500 vs. credit")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(
+            _rv_grouped_bar(rv, "yield_curve_regime", YIELD_CURVE_ORDER, "Yield curve regime"),
+            width="stretch",
+            theme="streamlit",
+        )
+    with col2:
+        st.plotly_chart(
+            _rv_grouped_bar(rv, "dollar_regime", DOLLAR_ORDER, "Dollar regime"),
+            width="stretch",
+            theme="streamlit",
+        )
+    st.caption(
+        "Same yield-curve and dollar regime definitions used across the "
+        "dashboard. Thin buckets are noisy - check the sample-size columns "
+        "in the table below before reading too much into any one figure."
+    )
+
+    st.subheader("Relative value: S&P 500 minus credit, by regime")
+    table = _rv_spread_table(rv)
+    display = table.rename(
+        columns={
+            "yield_curve_regime": "Yield curve",
+            "dollar_regime": "Dollar",
+            "pct_of_days": "% of days",
+            "n_days": "Trading days",
+        }
+    )
+    pct_cols = [c for c in display.columns if c not in ("Yield curve", "Dollar", "% of days", "Trading days")]
+    fmt = {c: "{:+.1%}" for c in pct_cols}
+    fmt["% of days"] = "{:.1f}%"
+    st.dataframe(display.style.format(fmt), width="stretch")
+    st.caption(
+        "\"Spread\" = S&P 500's annualized return minus that credit "
+        "index's annualized return in the same regime bucket - positive "
+        "means equity outperformed credit in that regime, negative means "
+        "credit outperformed equity."
+    )
+
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Single Series", "Regime Analysis", "Global Indices", "Credit Indices", "Relative Value"]
 )
 with tab1:
     render_single_series_tab()
@@ -659,3 +827,5 @@ with tab3:
     render_global_indices_tab()
 with tab4:
     render_credit_indices_tab()
+with tab5:
+    render_relative_value_tab()

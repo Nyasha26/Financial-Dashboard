@@ -97,7 +97,7 @@ def get_regime_drivers(dollar_ma_window=200, start_date=None, end_date=None, use
 
 
 def get_aligned_series(
-    target_id,
+    target_ids,
     start_date=None,
     end_date=None,
     use_cache=True,
@@ -105,21 +105,32 @@ def get_aligned_series(
     dollar_ma_window=200,
 ):
     """
-    Pull `target_id` and align T10Y2Y + DTWEXBGS (+ its moving average),
-    and optionally FEDFUNDS, onto its calendar. Drivers that update less
-    often than the target (FEDFUNDS is monthly) are forward-filled onto
-    that calendar via merge_asof, i.e. each row carries the most recently
+    Pull one or more target series - if more than one, each after the
+    first is aligned (forward-filled via merge_asof) onto the first
+    target's calendar - and align T10Y2Y + DTWEXBGS (+ its moving
+    average), and optionally FEDFUNDS, onto that same calendar. Drivers
+    that update less often than the target (FEDFUNDS is monthly) are
+    forward-filled the same way, i.e. each row carries the most recently
     published driver value as of that date.
 
     Returns a DataFrame with columns
-    [date, <target_id>, T10Y2Y, DTWEXBGS, DTWEXBGS_MA] (+ FEDFUNDS if
-    include_fed=True).
+    [date, <target_ids...>, T10Y2Y, DTWEXBGS, DTWEXBGS_MA] (+ FEDFUNDS if
+    include_fed=True). dropna() at the end means the panel is naturally
+    bounded by whichever target has the shortest history.
     """
-    target = get_series(target_id, start_date, end_date, use_cache=use_cache)
-    target = target.rename(columns={"value": target_id}).sort_values("date").reset_index(drop=True)
+    if isinstance(target_ids, str):
+        target_ids = [target_ids]
+
+    base = get_series(target_ids[0], start_date, end_date, use_cache=use_cache)
+    aligned = base.rename(columns={"value": target_ids[0]}).sort_values("date").reset_index(drop=True)
+
+    for target_id in target_ids[1:]:
+        other = get_series(target_id, start_date, end_date, use_cache=use_cache)
+        other = other.rename(columns={"value": target_id}).sort_values("date")
+        aligned = pd.merge_asof(aligned, other, on="date", direction="backward")
 
     drivers = get_regime_drivers(dollar_ma_window, start_date, end_date, use_cache=use_cache)
-    aligned = pd.merge_asof(target, drivers, on="date", direction="backward")
+    aligned = pd.merge_asof(aligned, drivers, on="date", direction="backward")
 
     if include_fed:
         fedfunds = get_series("FEDFUNDS", start_date, end_date, use_cache=use_cache)
@@ -139,4 +150,28 @@ def get_regime_inputs(start_date=None, end_date=None, use_cache=True):
     """
     return get_aligned_series(
         "SP500", start_date, end_date, use_cache=use_cache, include_fed=True
+    )
+
+
+RELATIVE_VALUE_INSTRUMENTS = (
+    "SP500",
+    "BAMLHYH0A0HYM2TRIV",
+    "BAMLCC0A0CMTRIV",
+    "BAMLEMCBPITRIV",
+)
+
+
+def get_relative_value_inputs(start_date=None, end_date=None, use_cache=True):
+    """
+    S&P 500 plus the three ICE BofA credit total-return indices, all
+    aligned onto SP500's trading-day calendar and bounded by the credit
+    indices' shorter FRED history (2023-08-28+), so every instrument is
+    compared over the exact same dates and regimes.
+
+    Returns a DataFrame with columns
+    [date, SP500, BAMLHYH0A0HYM2TRIV, BAMLCC0A0CMTRIV, BAMLEMCBPITRIV,
+    T10Y2Y, DTWEXBGS, DTWEXBGS_MA].
+    """
+    return get_aligned_series(
+        list(RELATIVE_VALUE_INSTRUMENTS), start_date, end_date, use_cache=use_cache
     )
