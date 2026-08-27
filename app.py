@@ -180,10 +180,11 @@ def load_relative_value_frame(bypass_cache: bool = False) -> pd.DataFrame:
 
 # Regime drivers, sized to the move requested for the Beta tab. T10Y2Y,
 # THREEFYTP10, and FEDFUNDS are percentage-point spreads/rates (1bp =
-# 0.01); DTWEXBGS is an index level, so "$1" is read as a 1-point move.
+# 0.01); DTWEXBGS is an index level, so "$0.01" is read as a 0.01-point
+# move.
 BETA_DRIVERS = {
     "T10Y2Y": dict(name="Yield curve", move_size=0.01, move_label="1bp"),
-    "DTWEXBGS": dict(name="Dollar index", move_size=1.0, move_label="$1"),
+    "DTWEXBGS": dict(name="Dollar index", move_size=0.01, move_label="$0.01"),
     "THREEFYTP10": dict(name="Term premium", move_size=0.01, move_label="1bp"),
     "FEDFUNDS": dict(name="Fed funds", move_size=0.01, move_label="1bp"),
 }
@@ -919,8 +920,8 @@ def render_beta_tab() -> None:
     )
     st.markdown(
         "Each cell is a simple linear beta: the instrument's daily % "
-        "return per 1-unit move in the driver (1bp for a rate/spread, $1 "
-        "for the dollar index), expressed in basis points of return. "
+        "return per the driver's move (1bp for a rate/spread, $0.01 for "
+        "the dollar index), expressed in basis points of return. "
         "Computed only on days the driver actually moved, so Fed funds - "
         "which only changes a handful of times a year - isn't diluted by "
         "the many flat days forward-filled in between."
